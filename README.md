@@ -381,10 +381,44 @@ Optional: pass a different PM2 app name:
 
 ### 6. Connect MCP clients to your Linux host
 
-Example (Codex):
+#### Codex
 
 ```bash
 codex mcp add whatsapp --url http://<linux-server-ip>:8787/mcp
+```
+
+#### Claude Desktop (`claude_desktop_config.json`)
+
+Use [`mcp-remote`](https://github.com/geelen/mcp-remote) to connect Claude Desktop to your remote HTTP server.
+
+> **Important:** `mcp-remote` only allows HTTPS URLs by default. Since the server runs over plain HTTP (no TLS), you **must** add the `--allow-http` flag — otherwise the connection will fail with:
+> ```
+> Error: Non-HTTPS URLs are only allowed for localhost or when --allow-http flag is provided
+> ```
+
+```json
+{
+  "mcpServers": {
+    "whatsapp": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "http://<linux-server-ip>:8787/mcp",
+        "--allow-http"
+      ]
+    }
+  }
+}
+```
+
+After editing `claude_desktop_config.json`, restart the Claude Desktop app to apply the changes.
+
+> **Tip:** If your server is accessible via HTTPS (e.g. behind a reverse proxy with TLS), omit the `--allow-http` flag.
+
+#### Claude Code (CLI)
+
+```bash
+claude mcp add whatsapp --url http://<linux-server-ip>:8787/mcp
 ```
 
 ### 7. Linking Troubleshooting
