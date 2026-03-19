@@ -418,8 +418,10 @@ After editing `claude_desktop_config.json`, restart the Claude Desktop app to ap
 #### Claude Code (CLI)
 
 ```bash
-claude mcp add whatsapp --url http://<linux-server-ip>:8787/mcp
+claude mcp add --transport http whatsapp http://<linux-server-ip>:8787/mcp
 ```
+
+> **Note:** Claude Code's built-in HTTP transport accepts plain HTTP URLs directly — no `--allow-http` flag required.
 
 ### 7. Linking Troubleshooting
 
