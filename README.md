@@ -433,6 +433,25 @@ claude mcp add --transport http whatsapp http://<linux-server-ip>:8787/mcp
 pm2 restart whatsapp-mcp
 ```
 
+**Session invalidated by WhatsApp (`device_removed`, code 401)**
+
+If you see this in the error log:
+
+```
+"stream errored out" ... "code":"401" ... "type":"device_removed"
+```
+
+WhatsApp has remotely revoked the session (e.g. because you unlinked the device from your phone, or WhatsApp forced a re-link). The server cannot reconnect with the existing auth files — you must delete them and re-pair:
+
+```bash
+pm2 stop whatsapp-mcp
+rm -rf ~/whatsapp-mcp-data/auth/*   # adjust path to your WHATSAPP_AUTH_DIR
+pm2 start ecosystem.config.cjs
+./scripts/show-whatsapp-qr.sh       # or: whatsapp-qr
+```
+
+Then scan the QR code with **WhatsApp > Settings > Linked Devices > Link a Device**.
+
 ### 8. Quick Recovery (copy/paste runbook)
 
 Use these commands in order when the remote deployment is not behaving as expected:
@@ -458,6 +477,15 @@ If QR output is not scanable in PM2 logs:
 
 ```bash
 ./scripts/show-whatsapp-qr.sh
+```
+
+**Full re-link (session invalidated or corrupted):**
+
+```bash
+pm2 stop whatsapp-mcp
+rm -rf ~/whatsapp-mcp-data/auth/*   # adjust to your WHATSAPP_AUTH_DIR
+pm2 start ecosystem.config.cjs
+./scripts/show-whatsapp-qr.sh       # or: whatsapp-qr
 ```
 
 If PM2 is running but not restored after reboot:
