@@ -9,7 +9,56 @@ import * as path from "path";
 import * as fs from "fs";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { Writable } from "stream";
 import pino from "pino";
+
+// Self-healing: force a reconnect when Signal-protocol errors accumulate.
+// WhatsApp will kick ALL linked devices if Bad MAC / PreKey errors persist long enough.
+const SIGNAL_ERROR_THRESHOLD = parseInt(process.env.WHATSAPP_SIGNAL_ERROR_THRESHOLD || "10", 10);
+const SIGNAL_ERROR_WINDOW_MS = parseInt(process.env.WHATSAPP_SIGNAL_ERROR_WINDOW_MS || "120000", 10);
+
+/**
+ * Writable stream that passes every byte through to stderr while counting
+ * Signal-protocol error patterns. When the count exceeds SIGNAL_ERROR_THRESHOLD
+ * within SIGNAL_ERROR_WINDOW_MS milliseconds, onThreshold() is called so the
+ * caller can force a clean reconnect before WhatsApp revokes the session.
+ */
+class SignalErrorMonitor extends Writable {
+  private count = 0;
+  private windowStart = Date.now();
+  private readonly onThreshold: () => void;
+
+  constructor(onThreshold: () => void) {
+    super();
+    this.onThreshold = onThreshold;
+  }
+
+  _write(chunk: Buffer | string, _encoding: string, callback: () => void): void {
+    process.stderr.write(chunk);
+
+    const line = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+    const isSignalError =
+      line.includes("PreKeyError") ||
+      line.includes("Bad MAC") ||
+      line.includes("failed to decrypt");
+
+    if (isSignalError) {
+      const now = Date.now();
+      if (now - this.windowStart > SIGNAL_ERROR_WINDOW_MS) {
+        this.count = 0;
+        this.windowStart = now;
+      }
+      this.count++;
+      if (this.count >= SIGNAL_ERROR_THRESHOLD) {
+        this.count = 0;
+        this.windowStart = Date.now();
+        this.onThreshold();
+      }
+    }
+
+    callback();
+  }
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -304,14 +353,27 @@ export class WhatsAppClient {
         console.error("Failed to fetch latest Baileys version, continuing with defaults: " + e);
       }
 
-      // Create a logger that writes to stderr (stdout is for MCP JSON-RPC)
-      const logger = pino(
-        { level: "warn" },
-        pino.destination({ dest: 2, sync: true })
-      );
-
       // Each connect() gets a unique generation ID
       const generation = ++this.socketGeneration;
+
+      // Create a logger that writes to stderr (stdout is for MCP JSON-RPC).
+      // The SignalErrorMonitor passes bytes through to stderr and triggers a
+      // proactive reconnect when Signal-protocol errors accumulate — before
+      // WhatsApp decides to revoke the session for all linked devices.
+      const monitor = new SignalErrorMonitor(() => {
+        if (generation !== this.socketGeneration) return;
+        console.error(
+          `Signal error threshold reached (${SIGNAL_ERROR_THRESHOLD} errors within ${SIGNAL_ERROR_WINDOW_MS / 1000}s) — forcing reconnect to prevent session invalidation`
+        );
+        this.qrDisplayed = false;
+        try {
+          this.socket?.end(new Boom("Signal error threshold exceeded", { statusCode: 428 }));
+        } catch {
+          // If end() throws, fall back to closing the underlying WebSocket.
+          try { (this.socket as any)?.ws?.close(); } catch { /* ignore */ }
+        }
+      });
+      const logger = pino({ level: "warn" }, monitor);
 
       const browser = this.deviceName
         ? Browsers.appropriate(this.deviceName)
