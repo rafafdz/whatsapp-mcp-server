@@ -545,11 +545,12 @@ export class WhatsAppClient {
                 this.chatStore.set(jid, { id: jid, name, isGroup, conversationTimestamp: 0 });
                 changed = true;
               }
-              this.addToMessageStore(msg);
+              this.addToMessageStore(msg, true); // defer prune/save for bulk ingest
               added++;
             } catch { /* skip malformed history entries */ }
           }
         }
+        if (added > 0) { this.pruneMessageStore(); this.scheduleSaveMessageStore(); }
         if (changed) this.scheduleSaveChatStore();
         if (added > 0) {
           console.error("[history] synced " + added + " messages from WhatsApp history (store now " + this.countMessages() + ")");
@@ -957,7 +958,7 @@ export class WhatsAppClient {
     }
   }
 
-  private addToMessageStore(msg: any): void {
+  private addToMessageStore(msg: any, defer: boolean = false): void {
     const chatId = msg.key.remoteJid;
     if (!chatId) return;
 
@@ -991,8 +992,10 @@ export class WhatsAppClient {
     list.push(stored);
     this.messageStore.set(chatId, list);
     this.rawMessageByKey.set(`${chatId}:${id}`, msg);
-    this.pruneMessageStore();
-    this.scheduleSaveMessageStore();
+    if (!defer) {
+      this.pruneMessageStore();
+      this.scheduleSaveMessageStore();
+    }
   }
 
   private extractTextAndType(msg: any): { text: string; type: string } {
