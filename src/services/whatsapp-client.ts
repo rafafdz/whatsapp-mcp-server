@@ -402,6 +402,9 @@ export class WhatsAppClient {
           connected: false,
           qrCode: qr,
         });
+        // Opt-in: export the raw QR to a file for headless pairing UIs.
+        const _qrFile = process.env.WHATSAPP_QR_FILE;
+        if (_qrFile) { try { fs.writeFileSync(_qrFile, qr); } catch { /* ignore */ } }
         if (!this.qrDisplayed) {
           try {
             import("qrcode-terminal").then((qrTerminal) => {
@@ -461,6 +464,9 @@ export class WhatsAppClient {
         }
       } else if (connection === "open") {
         this.qrDisplayed = false;
+        // Clear any exported QR file once linked.
+        const _qrFileOpen = process.env.WHATSAPP_QR_FILE;
+        if (_qrFileOpen) { try { fs.unlinkSync(_qrFileOpen); } catch { /* ignore */ } }
         // Only reset reconnect counter after 30s of stable connection
         setTimeout(() => {
           if (this.isConnected && generation === this.socketGeneration) {
