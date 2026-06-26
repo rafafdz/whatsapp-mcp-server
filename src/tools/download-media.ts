@@ -13,20 +13,28 @@ export function registerDownloadMediaTool(server: McpServer, client: WhatsAppCli
     "whatsapp_download_media",
     {
       title: "Download WhatsApp Media",
-      description: `Download media (attachments) for a message from the server's in-memory raw message store.
+      description: `Download a message's media (PDF, image, audio, video, document) to disk and return its path.
 
-Important:
-  - The server can only download media for messages it has observed since it started.
-  - Use whatsapp_list_messages to get message_id + chat_id.
+PREFERRED over whatsapp_get_media for reading file contents: the download
+directory (env WHATSAPP_DOWNLOAD_DIR) is a shared volume mounted into your
+code-execution/terminal environment at the SAME path, so the returned 'Path' is
+directly readable from your terminal — open/parse it there (e.g. extract a PDF
+with pypdf) instead of fetching base64. Only fall back to whatsapp_get_media
+(base64) if the returned path is not accessible from your environment.
+
+Notes:
+  - Media is fetched on demand; if WhatsApp's CDN expired it, your phone is asked
+    to re-upload (works only if the phone still has the file & is online).
+  - Use whatsapp_list_messages / whatsapp_search_messages to get message_id + chat_id.
 
 Args:
-  - chat_id (string): Chat JID (from whatsapp_list_messages)
-  - message_id (string): Message ID (from whatsapp_list_messages)
-  - output_dir (string, optional): Directory to write the file to (supports "~/" expansion)
+  - chat_id (string): Chat JID
+  - message_id (string): Message ID
+  - output_dir (string, optional): Override the directory to write to ("~/" expands)
 
 Returns:
-  - path: Absolute path to the downloaded file
-  - media: Metadata (kind, mimetype, etc.)`,
+  - path: Absolute path to the downloaded file (read this directly)
+  - media: Metadata (kind, mimetype, fileName, bytes, etc.)`,
       inputSchema: DownloadMediaInputSchema,
       annotations: {
         readOnlyHint: false,

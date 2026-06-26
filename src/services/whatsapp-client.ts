@@ -726,7 +726,7 @@ export class WhatsAppClient {
 
     const dir = outputDir
       ? (outputDir.startsWith("~/") ? path.join(os.homedir(), outputDir.slice(2)) : outputDir)
-      : path.join(this.authDir, "..", "downloads");
+      : (process.env.WHATSAPP_DOWNLOAD_DIR || path.join(this.authDir, "..", "downloads"));
     await fs.promises.mkdir(dir, { recursive: true });
 
     const baseName = meta.fileName || `whatsapp-${messageId}.${ext}`;
