@@ -30,6 +30,22 @@ test("add + count, and (chat_id,id) dedup is a no-op", () => {
   db.close();
 });
 
+test("re-sync upserts missing raw without duplicating the row", () => {
+  const db = freshDb();
+  // first arrival: no raw (e.g. migrated from legacy JSON store)
+  db.add(msg({ id: "a", chatId: "A" }));
+  assert.equal(db.getRaw("A", "a"), null);
+  // re-sync of the same message now carries the raw payload
+  db.add(msg({ id: "a", chatId: "A" }), { key: { id: "a" }, message: { documentMessage: {} } });
+  assert.equal(db.count(), 1); // still one row
+  const raw = db.getRaw("A", "a");
+  assert.ok(raw && raw.message && raw.message.documentMessage, "raw should be backfilled");
+  // a later re-sync without raw must not wipe the existing raw
+  db.add(msg({ id: "a", chatId: "A" }));
+  assert.ok(db.getRaw("A", "a"), "raw should be preserved");
+  db.close();
+});
+
 test("list filters by chat + date range and returns ascending", () => {
   const db = freshDb();
   db.addMany([

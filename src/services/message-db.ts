@@ -49,10 +49,16 @@ export class MessageDB {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.init();
+    // Upsert: a re-synced message backfills missing raw/media on an existing
+    // row (e.g. rows migrated from the legacy JSON store had no raw payload, so
+    // media couldn't be downloaded until a re-sync supplies it).
     this.insertStmt = this.db.prepare(
-      `INSERT OR IGNORE INTO messages
+      `INSERT INTO messages
         (id, chat_id, sender, sender_name, timestamp, text, is_from_me, is_group, type, media, raw)
-       VALUES (@id,@chat_id,@sender,@sender_name,@timestamp,@text,@is_from_me,@is_group,@type,@media,@raw)`
+       VALUES (@id,@chat_id,@sender,@sender_name,@timestamp,@text,@is_from_me,@is_group,@type,@media,@raw)
+       ON CONFLICT(chat_id, id) DO UPDATE SET
+         raw   = COALESCE(excluded.raw, messages.raw),
+         media = COALESCE(excluded.media, messages.media)`
     );
   }
 
