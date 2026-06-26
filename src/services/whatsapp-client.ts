@@ -11,6 +11,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { Writable } from "stream";
 import pino from "pino";
+import { MessageDB } from "./message-db.js";
 
 // Self-healing: force a reconnect when Signal-protocol errors accumulate.
 // WhatsApp will kick ALL linked devices if Bad MAC / PreKey errors persist long enough.
@@ -139,6 +140,7 @@ export class WhatsAppClient {
   private saveChatStoreInFlight: Promise<void> = Promise.resolve();
   private messageStore: Map<string, StoredMessage[]> = new Map();
   private rawMessageByKey: Map<string, any> = new Map();
+  private db!: MessageDB;
   private saveMessageStoreTimer: NodeJS.Timeout | null = null;
   private saveMessageStoreInFlight: Promise<void> = Promise.resolve();
   private reconnectCount440 = 0;
@@ -158,6 +160,31 @@ export class WhatsAppClient {
     this.maxMessagesPerChat = Number(process.env.WHATSAPP_MAX_MESSAGES_PER_CHAT || "200");
     this.maxMessagesTotal = Number(process.env.WHATSAPP_MAX_MESSAGES_TOTAL || "2000");
     this.deviceName = (process.env.WHATSAPP_DEVICE_NAME || "").trim() || undefined;
+
+    // SQLite-backed message store (indexed queries + FTS5 search). One-time
+    // migration of any legacy message-store.json into the DB on first boot.
+    const dbFile = path.join(this.authDir, "..", "messages.db");
+    try { fs.mkdirSync(path.dirname(dbFile), { recursive: true }); } catch { /* ignore */ }
+    this.db = new MessageDB(dbFile);
+    this.migrateLegacyStore();
+  }
+
+  private migrateLegacyStore(): void {
+    try {
+      if (this.db.count() > 0) return;
+      const file = this.messageStoreFile;
+      if (!fs.existsSync(file)) return;
+      const data = JSON.parse(fs.readFileSync(file, "utf-8"));
+      if (!Array.isArray(data) || data.length === 0) return;
+      this.db.addMany(
+        data
+          .filter((e: any) => e && typeof e.chatId === "string" && typeof e.id === "string")
+          .map((e: any) => ({ m: e as StoredMessage }))
+      );
+      console.error("Migrated " + this.db.count() + " messages from legacy message-store.json into SQLite");
+    } catch (e) {
+      console.error("Legacy store migration failed: " + e);
+    }
   }
 
   get status(): ConnectionStatus {
@@ -202,68 +229,10 @@ export class WhatsAppClient {
     }
   }
 
-  private loadMessageStore(): void {
-    if (!this.persistMessages) return;
-    try {
-      const file = this.messageStoreFile;
-      if (!fs.existsSync(file)) return;
-      const data = JSON.parse(fs.readFileSync(file, "utf-8"));
-      if (!Array.isArray(data)) return;
-      for (const entry of data) {
-        const chatId = entry?.chatId;
-        if (!chatId || typeof chatId !== "string") continue;
-        const list = this.messageStore.get(chatId) || [];
-        list.push(entry as StoredMessage);
-        this.messageStore.set(chatId, list);
-      }
-      this.pruneMessageStore();
-      console.error("Loaded message store (" + this.countMessages() + " messages) from persistent store");
-    } catch (e) {
-      console.error("Failed to load message store: " + e);
-    }
-  }
+  // Superseded by the SQLite store (constructor migrates the legacy JSON once).
+  private loadMessageStore(): void { /* no-op: messages live in SQLite */ }
 
-  loadRawMessageStore(): void {
-    if (!this.persistMessages) return;
-    try {
-      const file = this.messageStoreFile;
-      if (!fs.existsSync(file)) return;
-      const data = JSON.parse(fs.readFileSync(file, "utf-8"));
-      if (!Array.isArray(data)) return;
-      
-      let loadedCount = 0;
-      for (const entry of data) {
-        const chatId = entry?.chatId;
-        const messageId = entry?.id;
-        if (!chatId || !messageId || typeof chatId !== "string" || typeof messageId !== "string") continue;
-        
-        const key = `${chatId}:${messageId}`;
-        if (this.rawMessageByKey.has(key)) continue;
-        
-        const message = {
-          key: { remoteJid: chatId, fromMe: entry?.fromMe || false, id: messageId },
-          message: entry?.message,
-          messageTimestamp: entry?.timestamp,
-          messageStubType: entry?.stubType,
-          messageTimestampLow: entry?.timestampLow,
-          messageTimestampHigh: entry?.timestampHigh,
-          pushName: entry?.pushName,
-          participant: entry?.participant,
-          isForwarded: entry?.isForwarded,
-          isViewOnce: entry?.isViewOnce,
-        } as any;
-        
-        this.rawMessageByKey.set(key, message);
-        loadedCount++;
-      }
-      
-      if (loadedCount > 0) {
-        console.error("Loaded " + loadedCount + " raw messages from persistent store for media downloads");
-      }
-    } catch (e) {
-      console.error("Failed to load raw message store: " + e);
-    }
-  }
+  loadRawMessageStore(): void { /* no-op: raw payloads live in SQLite */ }
 
   private scheduleSaveChatStore(): void {
     if (this.saveChatStoreTimer) return;
@@ -550,7 +519,6 @@ export class WhatsAppClient {
             } catch { /* skip malformed history entries */ }
           }
         }
-        if (added > 0) { this.pruneMessageStore(); this.scheduleSaveMessageStore(); }
         if (changed) this.scheduleSaveChatStore();
         if (added > 0) {
           console.error("[history] synced " + added + " messages from WhatsApp history (store now " + this.countMessages() + ")");
@@ -735,8 +703,7 @@ export class WhatsAppClient {
   ): Promise<{ path: string; media: WhatsAppMedia }> {
     const sock = this.ensureConnected();
     const normalizedChatId = this.normalizeJid(chatId);
-    const key = `${normalizedChatId}:${messageId}`;
-    const msg = this.rawMessageByKey.get(key);
+    const msg = this.db.getRaw(normalizedChatId, messageId);
     if (!msg) {
       throw new Error(
         "Message not found in the in-memory store. " +
@@ -788,8 +755,7 @@ export class WhatsAppClient {
   ): Promise<{ base64: string; media: WhatsAppMedia }> {
     const sock = this.ensureConnected();
     const normalizedChatId = this.normalizeJid(chatId);
-    const key = `${normalizedChatId}:${messageId}`;
-    const msg = this.rawMessageByKey.get(key);
+    const msg = this.db.getRaw(normalizedChatId, messageId);
     if (!msg) {
       throw new Error(
         "Message not found in the in-memory store. " +
@@ -828,18 +794,20 @@ export class WhatsAppClient {
     };
   }
 
-  async listMessages(chatId?: string, limit: number = 20): Promise<WhatsAppMessage[]> {
+  async listMessages(
+    chatId?: string,
+    limit: number = 20,
+    opts: { before?: number; after?: number; offset?: number } = {}
+  ): Promise<WhatsAppMessage[]> {
     const normalized = chatId ? this.normalizeJid(chatId) : undefined;
-    const messages = normalized
-      ? (this.messageStore.get(normalized) || [])
-      : this.flattenMessageStore();
-
-    const slice = messages
-      .slice()
-      .sort((a, b) => a.timestamp - b.timestamp);
-
-    const tail = slice.slice(Math.max(0, slice.length - limit));
-    return tail.map((m) => ({
+    const rows = this.db.list({
+      chatId: normalized,
+      limit,
+      before: opts.before,
+      after: opts.after,
+      offset: opts.offset,
+    });
+    return rows.map((m) => ({
       ...m,
       chatName: this.chatStore.get(m.chatId)?.name || m.chatId.split("@")[0],
     }));
@@ -865,13 +833,26 @@ export class WhatsAppClient {
 
   async searchMessages(
     query: string,
-    chatId?: string,
-    limit: number = 20
+    opts: { chatId?: string; sender?: string; before?: number; after?: number; limit?: number } = {}
   ): Promise<WhatsAppMessage[]> {
-    throw new Error(
-      "Message search requires a message store implementation. " +
-      "Use whatsapp_list_messages to browse recent messages observed by this server."
-    );
+    const normalized = opts.chatId ? this.normalizeJid(opts.chatId) : undefined;
+    const rows = this.db.search({
+      query,
+      chatId: normalized,
+      sender: opts.sender,
+      before: opts.before,
+      after: opts.after,
+      limit: opts.limit,
+    });
+    return rows.map((m) => ({
+      ...m,
+      chatName: this.chatStore.get(m.chatId)?.name || m.chatId.split("@")[0],
+    }));
+  }
+
+  /** Sandboxed read-only SQL over the message DB (SELECT/WITH only). */
+  async queryMessages(sql: string, limit: number = 200): Promise<any[]> {
+    return this.db.query(sql, limit);
   }
 
   async getGroupInfo(groupId: string): Promise<{
@@ -907,9 +888,7 @@ export class WhatsAppClient {
   }
 
   private countMessages(): number {
-    let n = 0;
-    for (const list of this.messageStore.values()) n += list.length;
-    return n;
+    return this.db.count();
   }
 
   private flattenMessageStore(): StoredMessage[] {
@@ -958,7 +937,7 @@ export class WhatsAppClient {
     }
   }
 
-  private addToMessageStore(msg: any, defer: boolean = false): void {
+  private addToMessageStore(msg: any, _defer: boolean = false): void {
     const chatId = msg.key.remoteJid;
     if (!chatId) return;
 
@@ -988,14 +967,7 @@ export class WhatsAppClient {
       ...(media ? { media } : {}),
     };
 
-    const list = this.messageStore.get(chatId) || [];
-    list.push(stored);
-    this.messageStore.set(chatId, list);
-    this.rawMessageByKey.set(`${chatId}:${id}`, msg);
-    if (!defer) {
-      this.pruneMessageStore();
-      this.scheduleSaveMessageStore();
-    }
+    this.db.add(stored, msg);
   }
 
   private extractTextAndType(msg: any): { text: string; type: string } {

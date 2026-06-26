@@ -36,7 +36,11 @@ Returns:
     },
     async (params: ListMessagesInput) => {
       try {
-        const messages = await client.listMessages(params.chat_id, params.limit);
+        const messages = await client.listMessages(params.chat_id, params.limit, {
+          after: params.after,
+          before: params.before,
+          offset: params.offset,
+        });
         if (messages.length === 0) {
           return {
             content: [{
