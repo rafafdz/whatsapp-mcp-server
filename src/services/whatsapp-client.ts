@@ -389,7 +389,7 @@ export class WhatsAppClient {
         logger: logger as any,
         printQRInTerminal: false,
         generateHighQualityLinkPreview: false,
-        syncFullHistory: false,
+        syncFullHistory: true,
       });
 
       this.socket.ev.on("creds.update", saveCreds);
@@ -507,6 +507,47 @@ export class WhatsAppClient {
       if (changed) {
         this.scheduleSaveChatStore();
       }
+      });
+
+    // Ingest WhatsApp's on-link history sync (fires when syncFullHistory is on).
+    // Feeds synced messages through the same store path as live messages so
+    // whatsapp_list_messages can return history from before this device linked.
+      this.socket.ev.on("messaging-history.set", (payload: any) => {
+        const { chats, messages } = payload || {};
+        let changed = false;
+        if (Array.isArray(chats)) {
+          for (const c of chats) {
+            const jid = c?.id;
+            if (!jid || jid === "status@broadcast") continue;
+            if (!this.chatStore.has(jid)) {
+              const isGroup = jid.endsWith("@g.us");
+              const name = (c.name || c.subject || jid.split("@")[0]);
+              this.chatStore.set(jid, { id: jid, name, isGroup, conversationTimestamp: 0 });
+              changed = true;
+            }
+          }
+        }
+        let added = 0;
+        if (Array.isArray(messages)) {
+          for (const msg of messages) {
+            try {
+              const jid = msg?.key?.remoteJid;
+              if (!jid || jid === "status@broadcast") continue;
+              if (!this.chatStore.has(jid)) {
+                const isGroup = jid.endsWith("@g.us");
+                const name = isGroup ? jid.split("@")[0] : (msg.pushName || jid.split("@")[0]);
+                this.chatStore.set(jid, { id: jid, name, isGroup, conversationTimestamp: 0 });
+                changed = true;
+              }
+              this.addToMessageStore(msg);
+              added++;
+            } catch { /* skip malformed history entries */ }
+          }
+        }
+        if (changed) this.scheduleSaveChatStore();
+        if (added > 0) {
+          console.error("[history] synced " + added + " messages from WhatsApp history (store now " + this.countMessages() + ")");
+        }
       });
 
     // Listen for contacts to get names for individual chats
