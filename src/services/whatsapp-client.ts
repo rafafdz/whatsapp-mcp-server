@@ -141,6 +141,7 @@ export class WhatsAppClient {
   private messageStore: Map<string, StoredMessage[]> = new Map();
   private rawMessageByKey: Map<string, any> = new Map();
   private db!: MessageDB;
+  private backfillRan = false;
   private saveMessageStoreTimer: NodeJS.Timeout | null = null;
   private saveMessageStoreInFlight: Promise<void> = Promise.resolve();
   private reconnectCount440 = 0;
@@ -448,6 +449,9 @@ export class WhatsAppClient {
           phoneNumber,
         });
         console.error("WhatsApp connected as +" + phoneNumber);
+        // Optional history backfill (gated by WHATSAPP_BACKFILL); delay so the
+        // on-link sync settles first. Runs at most once per process.
+        setTimeout(() => { void this.backfillHistory(); }, 30000);
       }
       });
 
@@ -853,6 +857,58 @@ export class WhatsAppClient {
   /** Sandboxed read-only SQL over the message DB (SELECT/WITH only). */
   async queryMessages(sql: string, limit: number = 200): Promise<any[]> {
     return this.db.query(sql, limit);
+  }
+
+  /**
+   * On-demand history backfill: walks the oldest message of each chat further
+   * back via Baileys' fetchMessageHistory. Results arrive via messaging-history.set
+   * and are stored in SQLite. Opt-in + conservative (WhatsApp rate-limits aggressive
+   * history pulls, and only serves what its servers still retain).
+   *
+   * Env: WHATSAPP_BACKFILL=1 to enable; WHATSAPP_BACKFILL_ROUNDS (6),
+   * WHATSAPP_BACKFILL_CHATS (40, 0=all), WHATSAPP_BACKFILL_PER (50),
+   * WHATSAPP_BACKFILL_DELAY_MS (3000).
+   */
+  private async backfillHistory(): Promise<void> {
+    const enabled = /^(1|true|yes|y)$/i.test((process.env.WHATSAPP_BACKFILL || "").trim());
+    if (!enabled || this.backfillRan) return;
+    this.backfillRan = true;
+    const sock = this.socket;
+    if (!sock || typeof sock.fetchMessageHistory !== "function") {
+      console.error("[backfill] fetchMessageHistory unavailable; skipping");
+      return;
+    }
+    const rounds = Number(process.env.WHATSAPP_BACKFILL_ROUNDS || "6");
+    const per = Number(process.env.WHATSAPP_BACKFILL_PER || "50");
+    const delay = Number(process.env.WHATSAPP_BACKFILL_DELAY_MS || "3000");
+    const maxChats = Number(process.env.WHATSAPP_BACKFILL_CHATS || "40");
+    const chats = this.db.chatsByActivity(maxChats);
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const startCount = this.db.count();
+    console.error(`[backfill] starting: ${chats.length} chats × up to ${rounds} rounds (per=${per}, delay=${delay}ms)`);
+    let requests = 0;
+    for (const chatId of chats) {
+      let lastOldest = Number.POSITIVE_INFINITY;
+      for (let round = 0; round < rounds; round++) {
+        if (!this.isConnected) { console.error("[backfill] disconnected; stopping"); return; }
+        const oldest = this.db.oldestInChat(chatId);
+        if (!oldest) break;
+        if (oldest.timestamp >= lastOldest) break; // no older messages arrived → done with this chat
+        lastOldest = oldest.timestamp;
+        const isGroup = chatId.endsWith("@g.us");
+        const key: any = { remoteJid: chatId, id: oldest.id, fromMe: oldest.isFromMe };
+        if (isGroup && !oldest.isFromMe && oldest.sender) key.participant = oldest.sender;
+        try {
+          await sock.fetchMessageHistory(per, key, oldest.timestamp);
+          requests++;
+        } catch (e: any) {
+          console.error("[backfill] fetch failed for " + chatId + ": " + (e?.message || e));
+          break;
+        }
+        await sleep(delay);
+      }
+    }
+    console.error(`[backfill] done: ${requests} requests; store ${startCount} → ${this.db.count()}`);
   }
 
   async getGroupInfo(groupId: string): Promise<{

@@ -183,6 +183,22 @@ export class MessageDB {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM messages").get() as any).c;
   }
 
+  /** Oldest stored message in a chat — anchor for history backfill. */
+  oldestInChat(chatId: string): { id: string; sender: string; isFromMe: boolean; timestamp: number } | null {
+    const r: any = this.db
+      .prepare("SELECT id, sender, is_from_me, timestamp FROM messages WHERE chat_id = ? ORDER BY timestamp ASC LIMIT 1")
+      .get(chatId);
+    return r ? { id: r.id, sender: r.sender, isFromMe: !!r.is_from_me, timestamp: r.timestamp } : null;
+  }
+
+  /** Chat JIDs ordered by most-recent activity (optionally capped). */
+  chatsByActivity(limit = 0): string[] {
+    const sql =
+      "SELECT chat_id FROM messages GROUP BY chat_id ORDER BY MAX(timestamp) DESC" +
+      (limit > 0 ? " LIMIT " + Math.floor(limit) : "");
+    return this.db.prepare(sql).all().map((r: any) => r.chat_id);
+  }
+
   /**
    * Sandboxed read-only query. Only a single SELECT/WITH statement is allowed;
    * the prepared statement must be read-only. Returns at most `limit` rows.

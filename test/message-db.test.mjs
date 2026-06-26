@@ -64,6 +64,23 @@ test("FTS search finds messages by keyword, scoped + filtered", () => {
   db.close();
 });
 
+test("oldestInChat + chatsByActivity (backfill helpers)", () => {
+  const db = freshDb();
+  db.addMany([
+    { m: msg({ id: "1", chatId: "A", timestamp: 300 }) },
+    { m: msg({ id: "2", chatId: "A", timestamp: 100, sender: "x@s.whatsapp.net", isFromMe: false }) },
+    { m: msg({ id: "3", chatId: "B", timestamp: 500 }) },
+  ]);
+  const oldestA = db.oldestInChat("A");
+  assert.equal(oldestA.id, "2");
+  assert.equal(oldestA.timestamp, 100);
+  assert.equal(db.oldestInChat("ZZZ"), null);
+  // B is more recently active (ts 500) than A (300) → comes first
+  assert.deepEqual(db.chatsByActivity(), ["B", "A"]);
+  assert.deepEqual(db.chatsByActivity(1), ["B"]);
+  db.close();
+});
+
 test("read-only query allows SELECT and blocks writes", () => {
   const db = freshDb();
   db.addMany([
